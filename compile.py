@@ -7,8 +7,9 @@ import datetime
 import sys
 from copy import deepcopy
 from pathlib import Path
-from typing import Literal, TypeAlias, TypedDict
+from typing import Literal, TypeAlias, TypedDict, Protocol, final, override
 
+import attrs
 import httpx
 import yaml
 
@@ -45,75 +46,123 @@ class ConfInfoDict(TypedDict):
     country: str
 
 
-def build_name(name: str, inf: ConfInfoDict) -> str:
-    """Build name.
+class String(Protocol):
 
-    >>> build_name('ABC', {'year': '2099', 'url': 'https://google.com', 'later': False})
-    "[ABC'99](<https://google.com>)"
-    >>> build_name('ABC', {'year': 2099, 'url': 'https://google.com', 'later': False})
-    "[ABC'99](<https://google.com>)"
-    """
-    year = str(inf["year"])[-2:]
-    return "[{0}'{1}](<{2}>)".format(
-        name,
-        year,
-        inf[UrlStrLiteral] if inf["later"] else validate_url(inf[UrlStrLiteral]),
-    )
+    def to_str(self) -> str: ...
 
 
-def date_actual(date: datetime.date) -> datetime.date:
-    today = datetime.datetime.now(tz=datetime.UTC).date()
-    if date > today:
-        return date
-    msg = f"{date} expired for today {today}"
-    raise ExpiredCfpError(msg)
+class Date(Protocol):
+
+    def to_date(self) -> datetime.date: ...
 
 
-def render_date(date: RawDateT | None) -> str:
-    """Render date.
+@final
+@attrs.define(frozen=True)
+class CfName(String):
+    _name: str
+    _inf: ConfInfoDict
 
-    >>> render_date("2090-01-01")
-    '90-Jan'
-    >>> render_date("closed")
-    'closed'
-    >>> render_date(None)
-    ''
-    """
-    if not date:
-        return ""
-    if date == ClosedStrLiteral:
-        return ClosedStrLiteral
-    parsed = datetime.datetime.strptime(
-        date, "%Y-%m-%d",
-    ).replace(tzinfo=datetime.UTC).date()
-    return parsed.strftime("%y-%b")
+    @override
+    def to_str(self) -> str:
+        """Build name.
 
-
-def build_row(name: str, inf: list[dict], template: str) -> str:
-    return template.format(
-        name=build_name(name, inf),
-        publisher=inf["publisher"] or "",
-        rank="[{0}](<{1}>)".format(
-            inf[RankStrLiteral],
-            inf[UrlStrLiteral] if inf["later"] else validate_url(inf["core"]),
-        ),
-        scope=inf["scope"],
-        short=inf["short"] or "",
-        full=inf["full"] or "",
-        format=inf["format"] or "",
-        cfp=render_date(inf[CfpStrLiteral]),
-        country=inf["country"],
-    )
-
-
-def md_rows(yml: dict[str, ConfInfoDict], template: str) -> list[str]:
-    return [
-        build_row(name, inf, template)
-        for name, inf in sorted(
-            yml.items(),
-            key=_sort_key,
+        >>> CfName('ABC', {'year': '2099', 'url': 'https://google.com', 'later': False}).to_str()
+        "[ABC'99](<https://google.com>)"
+        >>> CfName('ABC', {'year': 2099, 'url': 'https://google.com', 'later': False}).to_str()
+        "[ABC'99](<https://google.com>)"
+        """
+        year = str(self._inf["year"])[-2:]
+        return "[{0}'{1}](<{2}>)".format(
+            self._name,
+            year,
+            self._inf[UrlStrLiteral] if self._inf["later"] else ValidUrl(self._inf[UrlStrLiteral]).to_str(),
         )
-    ]
+
+
+@final
+@attrs.define(frozen=True)
+class ActualDate(Date):
+
+    _date: datetime.date
+
+    def to_date(self) -> datetime.date:
+        today = datetime.datetime.now(tz=datetime.UTC).date()
+        if self._date > today:
+            return self._date
+        msg = f"{self._date} expired for today {today}"
+        raise ExpiredCfpError(msg)
+
+
+@final
+@attrs.define(frozen=True)
+class CfDate(String):
+    _date: RawDateT | None
+
+    @override
+    def to_str(self) -> str:
+        """Render date.
+
+        >>> CfDate("2090-01-01").to_str()
+        '90-Jan'
+        >>> CfDate("closed").to_str()
+        'closed'
+        >>> CfDate(None).to_str()
+        ''
+        """
+        if not self._date:
+            return ""
+        if self._date == ClosedStrLiteral:
+            return ClosedStrLiteral
+        parsed = datetime.datetime.strptime(
+            self._date, "%Y-%m-%d",
+        ).replace(tzinfo=datetime.UTC).date()
+        return parsed.strftime("%y-%b")
+
+
+@final
+@attrs.define(frozen=True)
+class TableRow(String):
+    _name: str
+    _inf: list[dict]
+    _template: str
+
+    @override
+    def to_str(self) -> str:
+        return self._template.format(
+            name=CfName(self._name, self._inf).to_str(),
+            publisher=self._inf["publisher"] or "",
+            rank="[{0}](<{1}>)".format(
+                self._inf[RankStrLiteral],
+                self._inf[UrlStrLiteral] if self._inf["later"] else ValidUrl(self._inf["core"]).to_str(),
+            ),
+            scope=self._inf["scope"],
+            short=self._inf["short"] or "",
+            full=self._inf["full"] or "",
+            format=self._inf["format"] or "",
+            cfp=CfDate(self._inf[CfpStrLiteral]).to_str(),
+            country=self._inf["country"],
+        )
+
+
+class TblRows(Protocol):
+
+    def rows(self) -> list[str]: ...
+
+
+@final
+@attrs.define(frozen=True)
+class TableRows(TblRows):
+    _yml: dict[str, ConfInfoDict]
+    _template: str
+    
+    def rows(self) -> list[str]:
+        return [
+            TableRow(name, inf, self._template).to_str()
+            for name, inf in sorted(
+                self._yml.items(),
+                key=_sort_key,
+            )
+        ]
 
 
 def _sort_key(elem: str) -> int:
@@ -124,14 +173,19 @@ def _sort_key(elem: str) -> int:
     return srtd[elem[1][RankStrLiteral]]
 
 
-def validate_url(url: str) -> str:
-    response = httpx.get(url)
-    success = httpx.codes.is_success(response.status_code)
-    allow = success or httpx.codes.is_redirect(response.status_code)
-    if not allow:
-        msg = f"Url = '{url}' return status = {response.status_code}"
-        raise InvalidUrlError(msg)
-    return url
+@final
+@attrs.define(frozen=True)
+class ValidUrl(String):
+    _url: str
+
+    def to_str(self):
+        response = httpx.get(self._url)
+        success = httpx.codes.is_success(response.status_code)
+        allow = success or httpx.codes.is_redirect(response.status_code)
+        if not allow:
+            msg = f"Url = '{self._url}' return status = {response.status_code}"
+            raise InvalidUrlError(msg)
+        return self._url
 
 
 def mark_expired_dates(path: str) -> None:
@@ -142,12 +196,12 @@ def mark_expired_dates(path: str) -> None:
         if not inf[CfpStrLiteral] or inf[CfpStrLiteral] == ClosedStrLiteral:
             continue
         try:
-            date_actual(
+            ActualDate(
                 datetime.datetime.strptime(
                     inf[CfpStrLiteral],
                     "%Y-%m-%d",
                 ).replace(tzinfo=datetime.UTC).date(),
-            )
+            ).to_date()
         except ExpiredCfpError:
             updated[name][CfpStrLiteral] = ClosedStrLiteral
     write_yaml_file(path, updated)
@@ -227,10 +281,10 @@ def generate(yml: str, md: str) -> None:
         ),
     )
     rows.extend(
-        md_rows(
+        TableRows(
             yaml.safe_load(Path(yml).read_text()),
             template,
-        ),
+        ).rows(),
     )
     sep = "<!-- events -->"
     split = Path(md).read_text().split(sep)

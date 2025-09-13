@@ -6,6 +6,8 @@
 #
 anyio==4.10.0
     # via httpx
+attrs==25.3.0
+    # via -r requirements.in
 certifi==2025.8.3
     # via
     #   httpcore
